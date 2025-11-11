@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+env/
+venv/
+*.egg-info/
+
+# C#
+bin/
+obj/
+*.user
+*.suo
+*.vs/
+
+# General
+*.log
+*.tmp
+.vscode/

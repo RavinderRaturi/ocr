@@ -154,6 +154,28 @@ def _avg_conf(blocks):
         return None
     return int(sum(confs)/len(confs))
 
+    
+# add near other helpers
+def is_noise_fragment(text):
+    if not text: 
+        return True
+    s = text.strip()
+    # drop very short tokens or tokens that are >70% digits/punctuation
+    if len(s) <= 2:
+        return True
+    # count letters vs others
+    letters = sum(1 for ch in s if ch.isalpha())
+    digits  = sum(1 for ch in s if ch.isdigit())
+    others  = len(s) - letters - digits
+    if letters == 0 and (digits + others) > 0 and len(s) <= 6:
+        # mostly digits/punctuation, short => noise
+        return True
+    # drop tokens that are punctuation only
+    if re.fullmatch(r'\W+', s):
+        return True
+    return False
+
+
 def group_lines_to_candidates(lines):
     candidates = []
     i = 0
@@ -206,17 +228,26 @@ def main(in_path, out_path):
     for page, words in sorted(pages.items()):
         lines = group_words_to_lines(words)
         lines_sorted = sorted(lines, key=lambda l: (l['top'], l['left']))
-        candidates = group_lines_to_candidates(lines_sorted)
+
+        # remove noise fragments before candidate formation
+        lines_filtered = [l for l in lines_sorted if not is_noise_fragment(l['text'])]
+        # optionally log how many lines were removed
+        if len(lines_filtered) < len(lines_sorted):
+            print(f"[Info] Page {page}: filtered {len(lines_sorted)-len(lines_filtered)} noise lines")
+
+        # produce candidates from the filtered lines
+        candidates = group_lines_to_candidates(lines_filtered)
+
+        # optional: post-merge step if you have expected_total_questions variable
+        # expected_total_questions = 120  # set if you want page-level post-merge
+        # candidates = post_merge_candidates(candidates, expected_total_questions, page=page)
+
         for c in candidates:
             c['page'] = page
             all_candidates.append(c)
+
     with open(out_path, 'w', encoding='utf-8') as f:
         for c in all_candidates:
             f.write(json.dumps(c, ensure_ascii=False) + '\n')
     print(f"Wrote {len(all_candidates)} candidates to {out_path}")
 
-if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print("Usage: python merge_candidates.py <input_blocks.jsonl> <out_candidates.jsonl>")
-        sys.exit(1)
-    main(sys.argv[1], sys.argv[2])

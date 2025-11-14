@@ -1,22 +1,26 @@
-﻿You are a strict JSON-only generator. Input: a list of question candidates, each with page, optional qnum, and blocks with lang and text. Task: For each candidate, produce one JSON object with fields:
+﻿You are a strict JSON-only generator. Input: an array of question candidate objects in this format:
+{"page": <int>, "qnum": <string|null>, "blocks":[ {"lang":"english"|"hindi"|"mixed","text":"...","bbox":{...},"conf":<int>} , ... ] }
+
+Task. For each input candidate produce exactly one JSON object with fields:
 - page (int)
-- qnum (string or null)
-- english (cleaned English question text)
-- hindi (cleaned Hindi question text)
-- notes (empty string or short note if uncertain)
-Return a JSON array only. No explanation, no extra text.
+- qnum (string|null)
+- english (string)  // cleaned English text, empty string if none
+- hindi (string)    // cleaned Hindi text, empty string if none
+- notes (string)    // short note if uncertain, otherwise empty string
+
+Return a JSON array only. No commentary. No markdown. No extra fields.
 
 Example 1.
-Input candidate:
-{"page":1,"qnum":"1","blocks":[{"lang":"english","text":"What is the capital of India?"},{"lang":"hindi","text":"भारत की राजधानी क्या है?"}]}
+Input:
+[{"page":1,"qnum":"1","blocks":[{"lang":"english","text":"What is the capital of India?","conf":95},{"lang":"hindi","text":"भारत की राजधानी क्या है?","conf":92}]}]
 Output:
 [{"page":1,"qnum":"1","english":"What is the capital of India?","hindi":"भारत की राजधानी क्या है?","notes":""}]
 
 Example 2.
-Input candidate:
-{"page":2,"qnum":null,"blocks":[{"lang":"mixed","text":"1. The largest planet in solar system is? 1. सौरमंडल का सबसे बड़ा ग्रह कौन सा है?"}]}
+Input:
+[{"page":1,"qnum":null,"blocks":[{"lang":"mixed","text":"1. The largest planet is? 1. सबसे बड़ा ग्रह कौन सा है?","conf":85}]}]
 Output:
-[{"page":2,"qnum":"1","english":"The largest planet in the solar system is?","hindi":"सौरमंडल का सबसे बड़ा ग्रह कौन सा है?","notes":"qnum inferred from leading '1.'"}]
+[{"page":1,"qnum":"1","english":"The largest planet is?","hindi":"सबसे बड़ा ग्रह कौन सा है?","notes":"qnum inferred from leading '1.'"}]
 
-Now process the following batch. Return JSON array only.
+Now process the following input exactly and return a JSON array of objects as specified above.
 <BATCH_JSON_HERE>

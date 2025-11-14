@@ -150,13 +150,42 @@ class Program
         }
         else
         {
-            // fallback minimal prompt
-            promptTemplate =
-@"You are a strict JSON-only generator. Input: an array of question candidates.
-For each candidate output an object with fields:
-page (int), qnum (string or null), english (string), hindi (string), notes (string).
-Return a JSON array only. No extra text.
-<BATCH_JSON_HERE>";
+//            // fallback minimal prompt
+//            promptTemplate =
+//@"You are a strict JSON-only generator. Input: an array of question candidates.
+//For each candidate output an object with fields:
+//page (int), qnum (string or null), english (string), hindi (string), notes (string).
+//Return a JSON array only. No extra text.
+//<BATCH_JSON_HERE>";
+              promptTemplate =
+                @"You are a strict JSON-only generator. Input: an array of question candidate objects in this format:
+{""page"": <int>, ""qnum"": <string|null>, ""blocks"":[ {""lang"":""english""|""hindi""|""mixed"",""text"":""..."",""bbox"":{...},""conf"":<int>} , ... ] }
+
+Task. For each input candidate produce exactly one JSON object with fields:
+- page (int)
+- qnum (string|null)
+- english (string)  // cleaned English text, empty string if none
+- hindi (string)    // cleaned Hindi text, empty string if none
+- notes (string)    // short note if uncertain, otherwise empty string
+
+Return a JSON array only. No commentary. No markdown. No extra fields.
+
+Example 1.
+Input:
+[{""page"":1,""qnum"":""1"",""blocks"":[{""lang"":""english"",""text"":""What is the capital of India?"",""conf"":95},{""lang"":""hindi"",""text"":""भारत की राजधानी क्या है?"",""conf"":92}]}]
+Output:
+[{""page"":1,""qnum"":""1"",""english"":""What is the capital of India?"",""hindi"":""भारत की राजधानी क्या है?"",""notes"":""""}]
+
+Example 2.
+Input:
+[{""page"":1,""qnum"":null,""blocks"":[{""lang"":""mixed"",""text"":""1. The largest planet is? 1. सबसे बड़ा ग्रह कौन सा है?"",""conf"":85}]}]
+Output:
+[{""page"":1,""qnum"":""1"",""english"":""The largest planet is?"",""hindi"":""सबसे बड़ा ग्रह कौन सा है?"",""notes"":""qnum inferred from leading '1.'""}]
+
+Now process the following input exactly and return a JSON array of objects as specified above.
+<BATCH_JSON_HERE>
+
+";
         }
 
         // HTTP client for Ollama
@@ -168,6 +197,9 @@ Return a JSON array only. No extra text.
         foreach (var kv in byPage)
         {
             int page = kv.Key;
+            // TEMP: process only page 1
+            if (page != 1)
+                continue;
             var batch = kv.Value;
             var batchJson = JsonSerializer.Serialize(batch, new JsonSerializerOptions { WriteIndented = false });
 
@@ -207,29 +239,111 @@ Return a JSON array only. No extra text.
 
             var respText = await resp.Content.ReadAsStringAsync();
 
+            // Save raw response for inspection
+            try
+            {
+                var rawPath = Path.Combine(Path.GetDirectoryName(blocksPath)!, $"raw_response_page_{page}.txt");
+                await File.WriteAllTextAsync(rawPath, respText, Encoding.UTF8);
+                Console.WriteLine("[Info] Saved raw Ollama response to: " + rawPath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[WARN] Failed to write raw response: " + ex.Message);
+            }
+
+
             // Attempt to extract JSON array from response text.
             string jsonArrayText = ExtractJsonArray(respText);
-            if (jsonArrayText == null)
+            // If extracted JSON looks like an array of primitives (numbers or strings), retry once
+            bool looksLikePrimitiveArray = false;
+            try
             {
-                Console.WriteLine("[WARN] Could not extract JSON array from Ollama response. Raw response below:");
-                Console.WriteLine(respText);
-                continue;
+                using var quickCheck = JsonDocument.Parse(jsonArrayText);
+                if (quickCheck.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    bool allPrimitive = true;
+                    foreach (var it in quickCheck.RootElement.EnumerateArray())
+                    {
+                        if (it.ValueKind == JsonValueKind.Object)
+                        {
+                            allPrimitive = false;
+                            break;
+                        }
+                    }
+                    looksLikePrimitiveArray = allPrimitive;
+                }
             }
+            catch
+            {
+                // ignore
+            }
+
+            if (looksLikePrimitiveArray)
+            {
+                Console.WriteLine("[WARN] Ollama returned primitive array, retrying with explicit correction instruction...");
+
+                var retryPrompt =
+                    "Your last output was an array of primitive values (numbers/strings). " +
+                    "You must return a JSON ARRAY OF OBJECTS. Each object must contain these fields ONLY: " +
+                    "page (int), qnum (string|null), english (string), hindi (string), notes (string). " +
+                    "Do not return arrays of numbers. Do not return plain strings. " +
+                    "Process the same input candidates again: " + batchJson;
+
+                var retryBody = new
+                {
+                    model = "qwen:7b",
+                    prompt = retryPrompt,
+                    max_tokens = 2000
+                };
+
+                var retryResp = await http.PostAsync(
+                    "http://localhost:11434/api/generate",
+                    new StringContent(JsonSerializer.Serialize(retryBody), Encoding.UTF8, "application/json")
+                );
+
+                var retryText = await retryResp.Content.ReadAsStringAsync();
+
+                // Save retry output for debugging
+                try
+                {
+                    var retryPath = Path.Combine(Path.GetDirectoryName(blocksPath)!, $"raw_response_page_{page}_retry.txt");
+                    await File.WriteAllTextAsync(retryPath, retryText, Encoding.UTF8);
+                }
+                catch { }
+
+                var retryJsonArray = ExtractJsonArray(retryText);
+                if (retryJsonArray != null)
+                    jsonArrayText = retryJsonArray;
+            }
+
 
             try
             {
                 var parsed = JsonDocument.Parse(jsonArrayText);
+                // after jsonArrayText obtained and parsed into parsedDoc
                 if (parsed.RootElement.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var item in parsed.RootElement.EnumerateArray())
                     {
+                        // reject primitive items like "1" or 1
+                        if (item.ValueKind != JsonValueKind.Object)
+                        {
+                            Console.WriteLine("[WARN] Skipping primitive model output item.");
+                            continue;
+                        }
+                        // require english or hindi non-empty
+                        string english = item.TryGetProperty("english", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() ?? "" : "";
+                        string hindi = item.TryGetProperty("hindi", out var h) && h.ValueKind == JsonValueKind.String ? h.GetString() ?? "" : "";
+                        if (string.IsNullOrWhiteSpace(english) && string.IsNullOrWhiteSpace(hindi))
+                        {
+                            Console.WriteLine("[WARN] Skipping empty question object from model.");
+                            // optionally log raw item to failures folder
+                            continue;
+                        }
                         finalQuestions.Add(item.Clone());
                     }
                 }
-                else
-                {
-                    Console.WriteLine("[WARN] Parsed JSON is not an array. Skipping this batch.");
-                }
+
             }
             catch (Exception ex)
             {
